@@ -1,3 +1,4 @@
+# bronze_layer
 # ----------------------------
 # In this script, I will run pyspark to load the raw CSV file into pyspark dataframe
 # ----------------------------
@@ -6,8 +7,8 @@
 from config import CUSTOMER_PATH,CLAIMS_PATH,POLICIES_PATH
 
 #We need to import SparkSession to create a connection with Spark API.
-from pyspark.sql import SparkSession 
-spark = SparkSession.builder.appName("load_raw_csv").getOrCreate()
+from spark_session import spark
+
 #To create a schema based on pyspark datatype
 from pyspark.sql.types import *
 

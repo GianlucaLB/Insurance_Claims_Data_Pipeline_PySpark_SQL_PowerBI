@@ -1,12 +1,12 @@
-from pyspark.sql import SparkSession
-
+#gold_layer.py
 from pyspark.sql.functions import *
 
 from pyspark.sql.window import Window
 
 from silver_layer import get_silver_claims_policies, get_silver_customer,get_silver_policies
 
-spark = SparkSession.builder.appName("gold_layer").getOrCreate()
+
+from spark_session import spark
 
 
 silver_claims_policies_enriched = get_silver_claims_policies(spark)
@@ -38,6 +38,7 @@ def build_dim_claim_type(silver_claims_df):
     distinct_types = silver_claims_df.select("claim_type").distinct()
     window_id = Window.orderBy("claim_type")
     return distinct_types.withColumn("claim_type_id", row_number().over(window_id))
+
 dim_claim_type = build_dim_claim_type(silver_claims_policies_enriched)
 
 #----------------------------

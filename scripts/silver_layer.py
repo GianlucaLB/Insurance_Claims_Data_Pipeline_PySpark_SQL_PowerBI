@@ -1,14 +1,19 @@
+#file:silver_layer.py
 # ----------------------------
 #we have to recreate the SparkSession for the silver_layer
 # ----------------------------
-from pyspark.sql import SparkSession
-spark = SparkSession.builder.appName("silver_layer").getOrCreate()
+from spark_session import spark
 
 # ----------------------------
-#We have to import pyspark.sql.functions to use pyspark functions such as col
-# ----------------------------
-from pyspark.sql.functions import *
-
+# Import the PySpark functions used for data cleaning and feature engineering.
+# # ----------------------------
+from pyspark.sql.functions import (
+    col,
+    when,
+    datediff,
+    count,
+    initcap
+)
 # ----------------------------
 #We have to import pyspark.sql.window to use pyspark Window functions
 # ----------------------------
@@ -55,8 +60,10 @@ tables = [
 def build_transformation_silver_claims_policies(spark, claims_df, policies_df):
     
     # ----------------------------
-    #How to calculate how many days between the policy start and the claim date
+    # Join claims with policies so we can derive additional business metrics
+    # such as policy age and processing time.
     # ----------------------------
+
     # We create a flag column to flag missing information in the claim_amount column in the claims table
     claims_df = claims_df.withColumn(
         "is_amount_missing",
@@ -79,6 +86,10 @@ def build_transformation_silver_claims_policies(spark, claims_df, policies_df):
     df_claim_policy_join = df_claim_policy_join\
                                             .withColumn("claim_date_secs", col("claim_date").cast("timestamp").cast("long"))
                                                     
+    # Create a rolling 12-month window for each policy.
+    # This allows us to count how many claims existed before
+    # the current claim, which is later used as part of the fraud
+    # risk score.
 
     window_func = Window.partitionBy("policy_id")\
                         .orderBy("claim_date_secs")\
@@ -86,6 +97,11 @@ def build_transformation_silver_claims_policies(spark, claims_df, policies_df):
 
     df_claim_policy_join = df_claim_policy_join.withColumn("claims_last_12m",count(col("claim_id")).over(window_func))
 
+    # Calculate a simple rule-based fraud risk score.
+    # Business rules:
+    # +2 -> high claim amount
+    # +2 -> frequent claims in the last 12 months
+    # +3 -> recently started policy
 
     df_claim_policy_join = df_claim_policy_join.withColumn("risk_score", (
                                                 when(col("claim_amount") > 10000, 2).otherwise(0) +
@@ -93,6 +109,8 @@ def build_transformation_silver_claims_policies(spark, claims_df, policies_df):
                                                 when(col("policy_age_days") < 30, 3).otherwise(0)
     ))
 
+    # Convert the numerical risk score into business-friendly
+    # categories that can be used directly in Power BI dashboards.
 
     df_claim_policy_join = df_claim_policy_join.withColumn("risk_category",
                                                             when(col("risk_score") <= 2 , "low")\
@@ -125,8 +143,11 @@ def get_silver_policies(spark):
     return build_silver_policies(policies_df)
 
 
+#-------------------------
+# Utility function used during development to inspect
+# data quality before applying transformations.
+#-------------------------
 
-#Check for duplicates and NULL values.
 if __name__ == "__main__":
     #-------------------------
     #How to check/count how many null values are present in our columns

@@ -24,82 +24,135 @@ from config import CUSTOMER_PATH,CLAIMS_PATH,POLICIES_PATH
 # ----------------------------
 from bronze_layer import load_customer_raw_csv, load_claims_raw_csv, load_policies_raw_csv
 
-bronze_customer_raw = load_customer_raw_csv(spark,CUSTOMER_PATH)
-bronze_claims_raw = load_claims_raw_csv(spark,CLAIMS_PATH)
-bronze_policies_raw = load_policies_raw_csv(spark,POLICIES_PATH)
-"""
-tables = [("customer", bronze_customer_raw), ("claims", bronze_claims_raw), ("policies", bronze_policies_raw)]
-
-#-------------------------
-#How to check/count how many null values are present in our columns
-# ----------------------------
-def check_null(table, name):
-    for cols in table.columns:
-        null_count = table.filter(col(cols).isNull()).count()
-        print(f"{name} -- {cols}: {null_count} null values")
-
-for name, table in tables:
-    check_null(table, name)
-    print(f"{'-' * 30}\n")
-
-
-#We create a flag column to flag missing information in the claim_amount column
-bronze_claims_raw = bronze_claims_raw.withColumn("is_amount_missing" , when(col("claim_amount").isNull(),True).otherwise(False))
-# ----------------------------
+silver_customer = load_customer_raw_csv(spark,CUSTOMER_PATH)
+silver_claims = load_claims_raw_csv(spark,CLAIMS_PATH)
+silver_policies = load_policies_raw_csv(spark,POLICIES_PATH)
 
 # ----------------------------
-#How to find duplicates 
+# How to remove duplicates
 # ----------------------------
-for name, table in tables:
-    total = table.count()
-    distinct = table.distinct().count()
-    print(f"{name} — Total: {total}, Distinct: {distinct}, Duplicates: {total - distinct}")
+silver_claims = silver_claims.dropDuplicates()
+silver_claims = silver_claims.dropDuplicates(["claim_id","policy_id"])
 
+silver_customer = silver_customer.dropDuplicates()
+silver_customer = silver_customer.dropDuplicates(["customer_id"])
 
-#How to remove duplicates
+silver_policies = silver_policies.dropDuplicates()
+silver_policies = silver_policies.dropDuplicates(["policy_id"])
 
-bronze_claims_raw = bronze_claims_raw.dropDuplicates()
-bronze_customer_raw = bronze_customer_raw.dropDuplicates()
-bronze_policies_raw = bronze_policies_raw.dropDuplicates()
-"""
-# ----------------------------
 
 # ----------------------------
-#How to calculate how many days between the policy start and the claim date
+#this is needed for the for loop
 # ----------------------------
+tables = [
+    ("customer", silver_customer),
+    ("claims", silver_claims),
+    ("policies", silver_policies)
+]
 
-#First we need to join claim and policies tables to have claim_date and policy_start_date
+# ----------------------------
+#
+def build_transformation_silver_claims_policies(spark, claims_df, policies_df):
+    
+    # ----------------------------
+    #How to calculate how many days between the policy start and the claim date
+    # ----------------------------
+    # We create a flag column to flag missing information in the claim_amount column in the claims table
+    claims_df = claims_df.withColumn(
+        "is_amount_missing",
+        when(col("claim_amount").isNull(), True).otherwise(False)
+    )
+    # we need to join claim and policies tables to have claim_date and policy_start_date
 
-df_claim_policy_join = bronze_claims_raw.join(bronze_policies_raw, on="policy_id",how="left")
-
-#With datediff we calculate how many days between the start of the policy untill the claim date
-df_claim_policy_join = df_claim_policy_join\
-                                        .withColumn("policy_age_days", datediff(col("claim_date"),col("policy_start_date")))\
-                                        .withColumn("processing_time_days", datediff(col("decision_date"),col("claim_date")))  
-
-df_claim_policy_join = df_claim_policy_join\
-                                        .withColumn("claim_date_secs", col("claim_date").cast("timestamp").cast("long"))
-                                                  
-
-window_func = Window.partitionBy("policy_id")\
-                    .orderBy("claim_date_secs")\
-                    .rangeBetween(-365*86400, -1)
-
-df_claim_policy_join = df_claim_policy_join.withColumn("claims_last_12m",count(col("claim_id")).over(window_func))
-
-
-df_claim_policy_join = df_claim_policy_join.withColumn("risk_score", (
-                                            when(col("claim_amount") > 10000, 2).otherwise(0) +
-                                            when(col("claims_last_12m") > 3, 2).otherwise(0) +
-                                            when(col("policy_age_days") < 30, 3).otherwise(0)
-))
+    df_claim_policy_join = claims_df.join(
+        policies_df,
+        on="policy_id",
+        how="left"
+    )
 
 
-df_claim_policy_join = df_claim_policy_join.withColumn("risk_category", when(col("risk_score") <= 2 , "low")\
-                                                       .when(col("risk_score") <= 4 , "Medium")\
+    #With datediff we calculate how many days between the start of the policy untill the claim date
+    df_claim_policy_join = df_claim_policy_join\
+                                            .withColumn("policy_age_days", datediff(col("claim_date"),col("policy_start_date")))\
+                                            .withColumn("processing_time_days", datediff(col("decision_date"),col("claim_date")))  
+
+    df_claim_policy_join = df_claim_policy_join\
+                                            .withColumn("claim_date_secs", col("claim_date").cast("timestamp").cast("long"))
+                                                    
+
+    window_func = Window.partitionBy("policy_id")\
+                        .orderBy("claim_date_secs")\
+                        .rangeBetween(-365*86400, -1)
+
+    df_claim_policy_join = df_claim_policy_join.withColumn("claims_last_12m",count(col("claim_id")).over(window_func))
+
+
+    df_claim_policy_join = df_claim_policy_join.withColumn("risk_score", (
+                                                when(col("claim_amount") > 10000, 2).otherwise(0) +
+                                                when(col("claims_last_12m") > 3, 2).otherwise(0) +
+                                                when(col("policy_age_days") < 30, 3).otherwise(0)
+    ))
+
+
+    df_claim_policy_join = df_claim_policy_join.withColumn("risk_category",
+                                                            when(col("risk_score") <= 2 , "low")\
+                                                        .when(col("risk_score") <= 4 , "Medium")\
                                                         .when(col("risk_score") <= 6 , "High")\
                                                         .otherwise("Critical"))
+    return df_claim_policy_join
 
-df_claim_policy_join.select("policy_id","claim_id","policy_age_days","claim_date_secs",
-                            "claims_last_12m","processing_time_days","risk_score"
-                            ,"risk_category").show()
+
+
+def build_silver_customer(customer_df):
+    customer_df = customer_df.withColumn("customer_region",initcap(col("customer_region")))
+    return customer_df
+
+def get_silver_claims_policies(spark):
+    claims_df = load_claims_raw_csv(spark, CLAIMS_PATH).dropDuplicates()
+    policies_df = load_policies_raw_csv(spark, POLICIES_PATH).dropDuplicates()
+    return build_transformation_silver_claims_policies(spark, claims_df, policies_df)
+
+def get_silver_customer(spark):
+    customer_df = load_customer_raw_csv(spark, CUSTOMER_PATH).dropDuplicates()
+    return build_silver_customer(customer_df)
+
+def build_silver_policies(policies_df):
+    policies_df = policies_df.withColumn("policy_region", initcap(col("policy_region")))
+    return policies_df
+
+def get_silver_policies(spark):
+    policies_df = load_policies_raw_csv(spark, POLICIES_PATH).dropDuplicates()
+    return build_silver_policies(policies_df)
+
+
+
+#Check for duplicates and NULL values.
+if __name__ == "__main__":
+    #-------------------------
+    #How to check/count how many null values are present in our columns
+    # ----------------------------
+    def check_null(table, name):
+        for cols in table.columns:
+            null_count = table.filter(col(cols).isNull()).count()
+            print(f"{name} -- {cols}: {null_count} null values")
+
+    for name, table in tables:
+        check_null(table, name)
+        print(f"{'-' * 30}\n")
+
+
+    #We create a flag column to flag missing information in the claim_amount column
+    # We create a flag column to flag missing information in the claim_amount column
+    silver_claims = silver_claims.withColumn("is_amount_missing",when(col("claim_amount").isNull(), True).otherwise(False))
+
+
+    #----------------------------
+    #How to find duplicates 
+    # ----------------------------
+
+    for name, table in tables:
+        total = table.count()
+        distinct = table.distinct().count()
+        print(f"{name} — Total: {total}, Distinct: {distinct}, Duplicates: {total - distinct}")
+
+    # ----------------------------

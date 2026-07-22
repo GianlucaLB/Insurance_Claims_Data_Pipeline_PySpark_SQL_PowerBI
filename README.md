@@ -1,2 +1,2 @@
-# Insurance Claims Data Pipeline with PySpark, SQL & Power BI
+# Insurance Claims Data Pipeline with PySpark & SQL
 

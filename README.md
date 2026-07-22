@@ -121,7 +121,7 @@ Several data quality rules are applied during the ETL process.
 | GitHub | Source code hosting |
 
 
-## 👋 About
+##  About
 
 Created by Gianluca La Barbera as part of a personal data analytics portfolio
 
